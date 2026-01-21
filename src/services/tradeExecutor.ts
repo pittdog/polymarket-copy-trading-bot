@@ -43,6 +43,8 @@ const tradeAggregationBuffer: Map<string, AggregatedTrade> = new Map();
 
 const readTempTrades = async (): Promise<TradeWithUser[]> => {
     const allTrades: TradeWithUser[] = [];
+    // Convert startup timestamp to seconds (Polymarket uses Unix seconds)
+    const startupTimestampSeconds = Math.floor(startupTimestamp / 1000);
 
     for (const { address, model } of userActivityModels) {
         // Only get trades that haven't been processed yet (bot: false AND botExcutedTime: 0)
@@ -58,7 +60,19 @@ const readTempTrades = async (): Promise<TradeWithUser[]> => {
             userAddress: address,
         }));
 
-        allTrades.push(...tradesWithUser);
+        const pastTrades = tradesWithUser.filter((trade) => {
+            if (trade.side === 'BUY' && trade.timestamp < startupTimestampSeconds) {
+                Logger.info(
+                    `Skipping historical BUY trade for ${trade.slug || trade.asset} (occurred before startup)`
+                );
+                // Mark as processed so we don't keep seeing it
+                model.updateOne({ _id: trade._id }, { bot: true }).exec();
+                return false;
+            }
+            return true;
+        });
+
+        allTrades.push(...pastTrades);
     }
 
     return allTrades;
@@ -266,6 +280,8 @@ const doAggregatedTrading = async (clobClient: ClobClient, aggregatedTrades: Agg
 // Track if executor should continue running
 let isRunning = true;
 
+const startupTimestamp = Date.now();
+
 /**
  * Stop the trade executor gracefully
  */
@@ -276,6 +292,7 @@ export const stopTradeExecutor = () => {
 
 const tradeExecutor = async (clobClient: ClobClient) => {
     Logger.success(`Trade executor ready for ${USER_ADDRESSES.length} trader(s)`);
+    Logger.info(`Only processing BUY trades after startup (${new Date(startupTimestamp).toISOString()})`);
     if (TRADE_AGGREGATION_ENABLED) {
         Logger.info(
             `Trade aggregation enabled: ${TRADE_AGGREGATION_WINDOW_SECONDS}s window, $${TRADE_AGGREGATION_MIN_TOTAL_USD} minimum`
