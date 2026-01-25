@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -15,6 +16,11 @@ const colors = {
     white: (text: string) => `\x1b[37m${text}\x1b[0m`,
 };
 
+interface TraderInfo {
+    id: string;
+    name: string;
+}
+
 interface Trade {
     id: string;
     timestamp: number;
@@ -31,7 +37,15 @@ interface Trade {
 
 interface TraderTrades {
     address: string;
+    name: string;
     trades: Trade[];
+}
+
+// Map address -> name for easy lookup
+const traderNames = new Map<string, string>();
+
+function getTraderName(address: string): string {
+    return traderNames.get(address.toLowerCase()) || formatAddress(address);
 }
 
 interface MatchedTrade {
@@ -321,18 +335,15 @@ function printResults(
     console.log(colors.bold(colors.green('🏆 TRADER LEADERSHIP SUMMARY:\n')));
     console.log(
         colors.gray(
-            '  Trader                  | Total Trades | Matched | Times First | Avg Lead Time | Avg Follow Time'
+            '  Trader                       | Total Trades | Matched | Times First | Avg Lead Time | Avg Follow Time'
         )
     );
-    console.log(colors.gray('  ' + '-'.repeat(95)));
+    console.log(colors.gray('  ' + '-'.repeat(100)));
 
     for (const summary of summaries) {
-        const firstPct =
-            summary.matchedTrades > 0
-                ? ((summary.timesFirst / summary.matchedTrades) * 100).toFixed(0)
-                : '0';
+        const displayName = getTraderName(summary.trader).padEnd(27);
         console.log(
-            `  ${colors.blue(formatAddress(summary.trader).padEnd(22))} | ` +
+            `  ${colors.blue(displayName)} | ` +
                 `${String(summary.totalTrades).padStart(12)} | ` +
                 `${String(summary.matchedTrades).padStart(7)} | ` +
                 `${colors.green(String(summary.timesFirst).padStart(11))} | ` +
@@ -359,9 +370,10 @@ function printResults(
             const marker = isFirst ? colors.green('→ FIRST') : colors.yellow('  FOLLOW');
             const timeSinceFirst =
                 j > 0 ? colors.gray(`(+${formatTimeDiff(t.timestamp - sortedTrades[0].timestamp)})`) : '';
+            const traderDisplay = getTraderName(t.address).padEnd(20);
 
             console.log(
-                `   ${marker} ${colors.blue(formatAddress(t.address))} | ` +
+                `   ${marker} ${colors.blue(traderDisplay)} | ` +
                     `${t.side === 'BUY' ? colors.green('BUY ') : colors.red('SELL')} | ` +
                     `$${t.usdcSize.toFixed(2).padStart(8)} @ $${t.price.toFixed(3)} | ` +
                     `${formatTimestamp(t.timestamp)} ${timeSinceFirst}`
@@ -429,13 +441,24 @@ function saveResults(
         config: {
             historyDays: HISTORY_DAYS,
             timeWindowHours: TIME_WINDOW_HOURS,
-            traders: traderData.map((t) => t.address),
+            traders: traderData.map((t) => ({
+                address: t.address,
+                name: t.name,
+                profileUrl: `https://polymarket.com/profile/${t.address}`,
+            })),
         },
         timestamp: Date.now(),
-        summaries,
+        summaries: summaries.map((s) => ({
+            ...s,
+            traderName: getTraderName(s.trader),
+        })),
         matchedTrades: matched.map((m) => ({
             ...m,
             polymarketUrl: `https://polymarket.com/event/${m.conditionId}`,
+            traderTrades: m.traderTrades.map((t) => ({
+                ...t,
+                traderName: getTraderName(t.address),
+            })),
         })),
     };
 
@@ -443,28 +466,72 @@ function saveResults(
     console.log(colors.green(`✓ Results saved to: ${filepath}\n`));
 }
 
+function parseTraders(): TraderInfo[] {
+    const traders: TraderInfo[] = [];
+
+    // Check command line args first (simple addresses only)
+    const args = process.argv.slice(2);
+    if (args.length >= 2) {
+        for (const arg of args) {
+            const addr = arg.trim().toLowerCase();
+            traders.push({ id: addr, name: formatAddress(addr) });
+        }
+        return traders;
+    }
+
+    // Check COMPARE_TRADERS env - supports JSON array or comma-separated
+    if (process.env.COMPARE_TRADERS) {
+        const envValue = process.env.COMPARE_TRADERS.trim();
+
+        // Try parsing as JSON array first
+        if (envValue.startsWith('[')) {
+            try {
+                const parsed = JSON.parse(envValue) as Array<{ id: string; name?: string }>;
+                for (const t of parsed) {
+                    const addr = t.id.trim().toLowerCase();
+                    traders.push({
+                        id: addr,
+                        name: t.name || formatAddress(addr),
+                    });
+                }
+                return traders;
+            } catch {
+                console.log(colors.yellow('⚠️  Failed to parse COMPARE_TRADERS as JSON, trying comma-separated'));
+            }
+        }
+
+        // Fall back to comma-separated addresses
+        const addresses = envValue.split(',');
+        for (const addr of addresses) {
+            const cleaned = addr.trim().toLowerCase();
+            traders.push({ id: cleaned, name: formatAddress(cleaned) });
+        }
+    }
+
+    return traders;
+}
+
 async function main() {
     console.log(colors.cyan('\n🔍 POLYMARKET TRADER COMPARISON TOOL\n'));
     console.log(colors.gray('Compare trading timing between multiple traders\n'));
 
-    // Get trader addresses from args or env
-    let traders: string[] = [];
+    // Get traders from args or env
+    const traders = parseTraders();
 
-    // Check command line args first
-    const args = process.argv.slice(2);
-    if (args.length >= 2) {
-        traders = args.map((t) => t.trim().toLowerCase());
-    } else if (process.env.COMPARE_TRADERS) {
-        traders = process.env.COMPARE_TRADERS.split(',').map((t) => t.trim().toLowerCase());
+    // Populate the name lookup map
+    for (const t of traders) {
+        traderNames.set(t.id, t.name);
     }
 
     if (traders.length < 2) {
         console.log(colors.red('❌ Please provide at least 2 trader addresses\n'));
         console.log('Usage:');
         console.log('  npm run compare-traders <address1> <address2> [address3] ...');
-        console.log('  OR set COMPARE_TRADERS env variable with comma-separated addresses\n');
+        console.log('  OR set COMPARE_TRADERS env variable\n');
         console.log('Environment variables:');
-        console.log('  COMPARE_TRADERS - Comma-separated trader addresses');
+        console.log('  COMPARE_TRADERS - JSON array or comma-separated addresses');
+        console.log('    JSON: \'[{"id":"0xabc...","name":"Whale1"},{"id":"0xdef...","name":"Trader2"}]\'');
+        console.log('    Simple: "0xabc...,0xdef..."');
         console.log('  COMPARE_HISTORY_DAYS - Days of history to analyze (default: 30)');
         console.log('  COMPARE_TIME_WINDOW_HOURS - Max time gap to consider same trade (default: 24)');
         console.log('  COMPARE_MAX_TRADES - Max trades to fetch per trader (default: 1000)\n');
@@ -473,8 +540,8 @@ async function main() {
 
     console.log(colors.cyan(`Comparing ${traders.length} traders:\n`));
     traders.forEach((t, i) => {
-        console.log(`  ${i + 1}. ${colors.blue(t)}`);
-        console.log(colors.gray(`     https://polymarket.com/profile/${t}`));
+        console.log(`  ${i + 1}. ${colors.blue(t.name)} ${colors.gray(`(${formatAddress(t.id)})`)}`);
+        console.log(colors.gray(`     https://polymarket.com/profile/${t.id}`));
     });
     console.log('');
 
@@ -483,9 +550,10 @@ async function main() {
         console.log(colors.cyan('\n📥 Fetching trade history...\n'));
         const traderData: TraderTrades[] = [];
 
-        for (const address of traders) {
-            const trades = await fetchTraderActivity(address);
-            traderData.push({ address, trades });
+        for (const trader of traders) {
+            console.log(colors.gray(`  Fetching trades for ${trader.name}...`));
+            const trades = await fetchTraderActivity(trader.id);
+            traderData.push({ address: trader.id, name: trader.name, trades });
             // Small delay to avoid rate limiting
             await new Promise((resolve) => setTimeout(resolve, 300));
         }
