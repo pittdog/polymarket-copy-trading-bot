@@ -35,6 +35,7 @@
         "aggregate": "ts-node src/scripts/aggregateResults.ts",
         "audit": "ts-node src/scripts/auditCopyTradingAlgorithmFixed.ts",
         "audit-old": "ts-node src/scripts/auditCopyTradingAlgorithm.ts",
+        "compare-traders": "ts-node src/scripts/compareTraders.ts",
         "health-check": "ts-node src/scripts/healthCheck.ts",
         "lint": "eslint .",
         "lint:fix": "eslint --fix .",
