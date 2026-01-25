@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -79,7 +80,7 @@ const HISTORY_DAYS = parseInt(process.env.SIM_HISTORY_DAYS || '30');
 const MULTIPLIER = parseFloat(process.env.TRADE_MULTIPLIER || '1.0');
 const MIN_ORDER_SIZE = parseFloat(process.env.SIM_MIN_ORDER_USD || '1.0');
 const MAX_TRADES_LIMIT = parseInt(process.env.SIM_MAX_TRADES || '2000');
-const MIN_TRADER_TRADES = parseInt(process.env.MIN_TRADER_TRADES || '100');
+const MIN_TRADER_TRADES = parseInt(process.env.MIN_TRADER_TRADES || '5');
 
 // Known successful traders list (fallback)
 const KNOWN_TRADERS = [
@@ -599,7 +600,114 @@ function saveResults(results: TraderResult[]) {
     console.log(colors.green(`✓ Results saved to: ${filepath}\n`));
 }
 
+async function fetchFirstTradersFromMarket(marketInput: string, limit: number = 10): Promise<string[]> {
+    try {
+        console.log(colors.cyan(`📊 Fetching first traders from market: ${marketInput}...\n`));
+
+        // Try to find market by slug first
+        let conditionId = marketInput;
+        if (!marketInput.startsWith('0x')) {
+            try {
+                const response = await axios.get('https://gamma-api.polymarket.com/markets', {
+                    params: { slug: marketInput },
+                    timeout: 15000,
+                });
+                if (response.data && response.data.length > 0) {
+                    conditionId = response.data[0].conditionId;
+                    console.log(colors.green(`✓ Found market: ${response.data[0].question}\n`));
+                }
+            } catch {
+                // Use input as conditionId
+            }
+        }
+
+        // Fetch trades
+        const response = await axios.get('https://data-api.polymarket.com/trades', {
+            params: { market: conditionId, limit: 500 },
+            timeout: 30000,
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+        });
+
+        // Sort by timestamp and get unique traders in order
+        const trades = response.data.sort((a: any, b: any) => a.timestamp - b.timestamp);
+        const traderOrder: string[] = [];
+
+        for (const trade of trades) {
+            const trader = trade.proxyWallet?.toLowerCase();
+            if (trader && !traderOrder.includes(trader)) {
+                traderOrder.push(trader);
+                if (traderOrder.length >= limit) break;
+            }
+        }
+
+        console.log(colors.green(`✓ Found ${traderOrder.length} first traders from market\n`));
+        return traderOrder;
+    } catch (error) {
+        console.error(colors.red('Failed to fetch market traders:'), error);
+        return [];
+    }
+}
+
+async function loadLeaderTraders(limit: number = 10): Promise<string[]> {
+    try {
+        console.log(colors.cyan('📊 Loading traders from leader results...\n'));
+
+        const resultsDir = path.join(process.cwd(), 'leader_trader_results');
+        if (!fs.existsSync(resultsDir)) {
+            console.log(colors.yellow('No leader_trader_results directory found'));
+            return [];
+        }
+
+        // Get most recent results file
+        const files = fs.readdirSync(resultsDir)
+            .filter(f => f.endsWith('.json'))
+            .sort()
+            .reverse();
+
+        if (files.length === 0) {
+            console.log(colors.yellow('No leader results files found'));
+            return [];
+        }
+
+        const latestFile = path.join(resultsDir, files[0]);
+        console.log(colors.gray(`Loading from: ${files[0]}`));
+
+        const data = JSON.parse(fs.readFileSync(latestFile, 'utf8'));
+        const traders = data.traders?.slice(0, limit).map((t: any) => t.address.toLowerCase()) || [];
+
+        console.log(colors.green(`✓ Loaded ${traders.length} leader traders\n`));
+        return traders;
+    } catch (error) {
+        console.error(colors.red('Failed to load leader traders:'), error);
+        return [];
+    }
+}
+
+function printUsage() {
+    console.log(colors.cyan('\n🔍 POLYMARKET TRADER FINDER\n'));
+    console.log(colors.bold('Usage:\n'));
+    console.log('  npm run find-traders                          # Use leaderboard or known traders');
+    console.log('  npm run find-traders --from-leaders           # Analyze traders from find-leaders results');
+    console.log('  npm run find-traders --from-leaders 20        # Analyze top 20 leader traders');
+    console.log('  npm run find-traders --market <slug>          # Analyze first traders in a market');
+    console.log('  npm run find-traders --market <slug> 15       # Analyze first 15 traders in market');
+    console.log('  npm run find-traders 0xabc... 0xdef...        # Analyze specific addresses');
+    console.log('  TRADER_LIST=0xabc,0xdef npm run find-traders  # Via environment variable\n');
+    console.log(colors.bold('Examples:\n'));
+    console.log('  npm run find-traders --from-leaders');
+    console.log('  npm run find-traders --market highest-temperature-in-london-on-january-25-8c');
+    console.log('  npm run find-traders 0x6c979ffcc3528a5d2395a2f7c89135711da0988c\n');
+}
+
 async function main() {
+    const args = process.argv.slice(2);
+
+    // Check for help
+    if (args.includes('--help') || args.includes('-h')) {
+        printUsage();
+        return;
+    }
+
     console.log(colors.cyan('\n🔍 POLYMARKET TRADER FINDER\n'));
     console.log(colors.gray(`Finding and analyzing the most profitable traders...\n`));
 
@@ -607,8 +715,27 @@ async function main() {
         // Get trader list
         let traders: string[] = [];
 
-        // Check if custom list provided via env
-        if (process.env.TRADER_LIST) {
+        // Parse command line arguments
+        if (args.includes('--from-leaders')) {
+            const idx = args.indexOf('--from-leaders');
+            const limit = parseInt(args[idx + 1]) || 10;
+            traders = await loadLeaderTraders(limit);
+        } else if (args.includes('--market')) {
+            const idx = args.indexOf('--market');
+            const market = args[idx + 1];
+            const limit = parseInt(args[idx + 2]) || 10;
+            if (!market) {
+                console.log(colors.red('Please provide a market slug or conditionId after --market'));
+                printUsage();
+                return;
+            }
+            traders = await fetchFirstTradersFromMarket(market, limit);
+        } else if (args.length > 0 && args[0].startsWith('0x')) {
+            // Direct addresses provided
+            traders = args.filter(a => a.startsWith('0x')).map(t => t.toLowerCase());
+            console.log(colors.cyan(`Using ${traders.length} addresses from command line\n`));
+        } else if (process.env.TRADER_LIST) {
+            // Check if custom list provided via env
             traders = process.env.TRADER_LIST.split(',').map((t) => t.trim().toLowerCase());
             console.log(colors.cyan(`Using custom trader list (${traders.length} traders)\n`));
         } else {

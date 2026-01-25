@@ -37,6 +37,7 @@
         "audit-old": "ts-node src/scripts/auditCopyTradingAlgorithm.ts",
         "compare-traders": "ts-node src/scripts/compareTraders.ts",
         "find-leaders": "ts-node src/scripts/findLeaderTraders.ts",
+        "find-profitable": "ts-node src/scripts/findProfitableTraders.ts",
         "find-first": "ts-node src/scripts/findFirstTrader.ts",
         "health-check": "ts-node src/scripts/healthCheck.ts",
         "lint": "eslint .",
